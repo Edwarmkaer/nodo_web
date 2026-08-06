@@ -1,0 +1,31 @@
+# Entorno — nunca se versiona
+.env
+.env.*
+!.env.example
+
+# Claves
+*.pem
+*.key
+jwks.private.json
+
+# Dependencias
+node_modules/
+.pnpm-store/
+
+# Build
+dist/
+build/
+*.tsbuildinfo
+
+# Portal
+.portal/
+
+# Sistema y editor
+.DS_Store
+*.log
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Claude Code
+.claude/settings.local.json

@@ -74,16 +74,43 @@ El `sessionToken` es la única credencial persistida en el navegador. El JWT de 
 
 **Estado:** cerrada
 
-**Decisión.** Toda comunicación en tiempo real pasa exclusivamente por `@portalsdk/react`. El frontend no abre websockets propios ni usa polling.
+**Decisión.** Toda comunicación en tiempo real pasa exclusivamente por `@portalsdk/react` (`useChannel`, `useInbox`). El frontend no abre websockets propios ni usa polling.
+
+**Patrón de inicialización (verificado con docs oficiales):**
+
+```ts
+import { Portal } from "@portalsdk/core";
+import { PortalProvider } from "@portalsdk/react";
+
+// Construir UNA VEZ, a nivel de módulo. Es síncrono y pasivo.
+const portal = new Portal({ apiKey: import.meta.env.VITE_PORTAL_PUBLIC_KEY });
+
+async function fetchPortalToken(): Promise<string> {
+  const res = await fetch(`${API_URL}/v1/portal/token`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${getSessionToken()}` },
+  });
+  const { token } = await res.json();
+  return token;
+}
+
+// En el árbol de componentes:
+<PortalProvider client={portal} token={fetchPortalToken}>
+  <App />
+</PortalProvider>
+```
 
 **Por qué.**
 - El contrato del backend ([03-portal-contract](../docs/03-portal-contract.md)) define que los clientes leen de canales Portal y emiten solo señales efímeras (typing, presence). No hay otro path de lectura en vivo.
-- El SDK ya provee hooks para canales (`useChannel`), presence, inbox (`useInbox`), y reconexión automática.
-- Usar una abstracción propia sobre websockets no aporta valor y duplica lógica de reconexión que Portal ya resuelve.
+- El SDK ya provee hooks para canales (`useChannel`), presence, inbox (`useInbox`), y reconexión automática con gap-fill.
+- Usar una abstracción propia sobre websockets no aporta valor y duplica lógica que Portal ya resuelve.
 
 **Consecuencias.**
-- El token de Portal se obtiene vía callback `async` que llama a `POST /v1/portal/token`. Nunca se pasa como string estático.
-- La detección de huecos de `seq` se implementa en el handler de mensajes del canal, no en el SDK.
+- `PortalProvider` recibe `client` (instancia de `Portal`) y `token` (callback async). No hay props `publicKey` ni `authToken`.
+- El callback `token` se re-invoca en connect, reconnect y expiry. Nunca se pasa un string estático.
+- No hay método `subscribe()` explícito: montar un componente con `useChannel({ channelId })` abre la conexión; desmontar la cierra (refcounted).
+- `portal.setToken(fetchPortalToken)` permite pasar de anónimo a identificado sin remount.
+- La detección de huecos de `seq` se implementa en el `onMessage` callback de `useChannel`.
 - Si Portal tiene una caída, el frontend queda sin actualizaciones en vivo pero el snapshot REST sigue disponible.
 
 ---

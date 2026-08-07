@@ -11,44 +11,51 @@ Obligatoria. Sin estos pasos el frontend no tiene datos ni tiempo real.
    → Si no: POST /v1/session → guardar { personId, sessionToken, recoveryCode }
    → Si sí: continuar con la sesión existente
 
-2. POST /v1/portal/token (Bearer sessionToken)
-   → { token, expiresIn: 900 }
-   → NO guardar el token: pasarlo al SDK via callback async
-
-3. GET /v1/graph
+2. GET /v1/graph
    → { nodes, edges, seq }
    → Cargar en el store Zustand con loadSnapshot()
 
-4. Inicializar Portal SDK con callback async de token
-   → subscribe('network-main')
-   → Aplicar parches de sobres con seq > snapshot.seq
+3. Montar PortalProvider con token callback
+   → El SDK conecta automáticamente al montar useChannel({ channelId: 'network-main' })
+   → El callback token llama a POST /v1/portal/token internamente
+
+4. useChannel({ channelId: 'network-main', onMessage: handler })
+   → Portal hace backfill automático (history: 50)
+   → El handler verifica seq y aplica parches con seq > snapshot.seq
 ```
+
+**No hay un paso explícito de "subscribe".** Montar el componente que usa `useChannel` es lo que abre la conexión. Desmontar la cierra.
 
 ### Inicialización del SDK
 
 ```ts
-import { PortalProvider } from '@portalsdk/react';
+import { Portal } from "@portalsdk/core";
+import { PortalProvider } from "@portalsdk/react";
+
+// Construir UNA VEZ, a nivel de módulo. Síncrono y pasivo.
+const portal = new Portal({ apiKey: import.meta.env.VITE_PORTAL_PUBLIC_KEY });
+
+async function fetchPortalToken(): Promise<string> {
+  const res = await fetch(`${API_URL}/v1/portal/token`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${getSessionToken()}` },
+  });
+  const { token } = await res.json();
+  return token;
+}
 
 function App() {
   return (
-    <PortalProvider
-      publicKey={import.meta.env.VITE_PORTAL_PUBLIC_KEY}
-      authToken={async () => {
-        const res = await fetch(`${API_URL}/v1/portal/token`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${getSessionToken()}` },
-        });
-        const { token } = await res.json();
-        return token;
-      }}
-    >
+    <PortalProvider client={portal} token={fetchPortalToken}>
       <RouterAndApp />
     </PortalProvider>
   );
 }
 ```
 
-**Punto crítico:** `authToken` es un callback `async`, nunca un string. El SDK lo reinvoca en conexión, reconexión y cada 15 min (expiración del JWT). Si se pasa un string, a los 15 min aparece `TokenExpiredError`.
+**Punto crítico:** `token` es un callback `async`, nunca un string. El SDK lo reinvoca en conexión, reconexión y expiración. Si se pasa un string estático, a los 15 min aparece `TokenExpiredError` y el canal pasa a status `"blocked"`.
+
+**Login/logout sin remount:** `portal.setToken(fetchPortalToken)` al hacer login, `portal.setToken(undefined)` al logout. El `PortalProvider` prop `token` ya forwadea a `setToken` internamente.
 
 ## Canales
 
@@ -117,10 +124,38 @@ Presence vive en `network-main`. Es la única fuente de "quién está en línea"
 
 **Presence solo indica online/offline.** No lleva status de dominio (`looking`, `teamed`, `idle`) porque Portal no re-emite la metadata de presence cuando el backend cambia `person.status`. El status de dominio se lee siempre del `GraphNode.status` en el `GraphStore`.
 
-**Uso en la UI:**
+### DetailedPresence vs AggregatePresence
+
+Portal expone dos modos de presence según el tamaño del canal:
+
+- **`DetailedPresence`** (`{ kind: "detailed", participants, count }`): roster completo de quién está conectado. Permite `OnlineIndicator` por persona.
+- **`AggregatePresence`** (`{ kind: "aggregate", count, recent }`): solo el conteo total y los últimos join/leave. NO da roster completo.
+
+**El frontend DEBE verificar `presence.kind` antes de asumir roster completo:**
+
+```ts
+const { presence } = useChannel({ channelId: 'network-main' });
+if (presence?.kind === 'detailed') {
+  // Roster completo: marcar cada persona online/offline
+  const onlineIds = new Set(presence.participants.map(p => p.id));
+  presenceStore.replaceAll([...onlineIds]);
+} else if (presence?.kind === 'aggregate') {
+  // Solo counter: mostrar "X personas en línea" sin badges individuales
+  // OnlineIndicator por persona NO es viable en este modo
+}
+```
+
+> ⚠️ **PREGUNTA SIN RESOLVER:** ¿A partir de cuántos participantes concurrentes un canal pasa de Detailed a Aggregate? Para un hackathon (50-200 personas), ¿`network-main` caería en modo agregado? Si sí, el diseño de `OnlineIndicator` individual no es viable y hay que mostrar solo un contador global.
+
+**Uso en la UI (si DetailedPresence):**
 - Badge verde/gris en avatares del marketplace: `presenceStore.online.has(personId)`.
 - Contador "X personas en línea" en el header: `presenceStore.online.size`.
 - En el grafo: nodos de personas online se resaltan visualmente.
+
+**Fallback (si AggregatePresence):**
+- Solo contador global: `presence.count`.
+- No hay badges individuales.
+- El grafo no resalta nodos individuales por presencia.
 
 **Limitación importante:** presence es exclusivamente websocket. El backend no puede leerlo. No se usa para lógica de negocio, solo para indicadores visuales.
 
@@ -209,12 +244,30 @@ Al recibir un mensaje:
 
 **Reconexión del SDK:** Portal maneja reconexión automática. Al reconectar, hace backfill de los últimos mensajes. Si con ese backfill no se cubre el hueco, la lógica de arriba detecta el gap y pide el snapshot.
 
-### Flujo visual durante reconexión
+### Flujo visual durante reconexión (7 estados reales de Portal)
 
-1. Se muestra un banner sutil "Reconectando..." mientras el SDK reconecta.
-2. Si se detecta hueco: "Sincronizando..." mientras se pide el snapshot.
-3. Al completar: se oculta el banner y el UI refleja el estado actual.
-4. No se pierde interacción del usuario: las acciones REST siguen funcionando (no dependen del websocket).
+El canal expone `status` con 7 valores posibles. El `ConnectionBanner` mapea cada uno:
+
+| Status de Portal | UI del banner | Notas |
+|---|---|---|
+| `idle` | — (no se muestra) | Handle creado pero no adquirido; no debería verse |
+| `connecting` | "Conectando..." con spinner | Primer intento |
+| `ready` | Banner oculto | Todo operativo |
+| `reconnecting` | "Reconectando..." con spinner | Socket caído, reintentando |
+| `degraded` | "Conexión inestable" (advertencia leve) | Parcialmente funcional |
+| `degraded-http` | "Conexión inestable — tus acciones siguen funcionando" | Socket caído pero HTTP publish funciona; las acciones REST no se pierden |
+| `blocked` | **"No se pudo conectar"** + acción (ej. "Reintentar" o "Volver a login") | **Terminal:** no hay reintento automático. NO mostrar spinner infinito. Causas: key inválida, baneado, no es miembro, canal lleno. |
+
+**Lógica de re-fetch de snapshot:**
+- Portal hace gap-fill automático al reconectar (replay de `last={seq}`).
+- Si tras la reconexión el primer mensaje que llega tiene `seq > lastSeq + 1` (el gap-fill no cubrió), entonces sí se dispara `GET /v1/graph` para reconstruir.
+- No se compara `seq` agresivamente en cada mensaje — solo tras una transición `reconnecting → ready` con gap visible.
+
+1. Al pasar a `reconnecting`: mostrar banner.
+2. Al volver a `ready`: verificar si el primer `seq` recibido post-reconexión cubre el gap.
+3. Si no cubre: "Sincronizando..." mientras se pide el snapshot.
+4. Al completar: se oculta el banner y el UI refleja el estado actual.
+5. Las acciones REST siguen funcionando durante `reconnecting` y `degraded-http`.
 
 ## Manejo de expiración de sugerencias
 

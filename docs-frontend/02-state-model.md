@@ -17,16 +17,18 @@ interface GraphStore {
   edges: Map<string, GraphEdge>;
   lastSeq: number;
   isLoading: boolean;
-  connectionStatus: 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
+  connectionStatus: 'idle' | 'connecting' | 'ready' | 'reconnecting' | 'degraded' | 'degraded-http' | 'blocked';
 
   // === Acciones ===
   loadSnapshot(snapshot: GraphSnapshot): void;
   applyPatch(patch: GraphPatch): void;
-  setConnectionStatus(status: ConnectionStatus): void;
+  setConnectionStatus(status: GraphStore['connectionStatus']): void;
 }
 ```
 
 Se usa `Map` en vez de objetos planos por rendimiento de lookup O(1) y por semántica de upsert/delete.
+
+> **Nota:** los 7 estados de conexión son los reales de Portal (`room.status`). `"ready"` es el equivalente a "connected"; `"blocked"` es terminal (no hay reintento).
 
 ### GraphNode y GraphEdge
 

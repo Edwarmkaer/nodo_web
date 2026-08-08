@@ -15,20 +15,23 @@ El backend valida con el esquema en el borde; el frontend usa el tipo. Una sola 
 
 | Regla | Detalle |
 |---|---|
-| Identificadores | `string` con prefijo por tipo: `per_`, `tm_`, `idea_`, `app_`, `sug_` |
+| Identificadores | `string` con prefijo por tipo: `per_`, `tm_`, `idea_`, `app_`, `sug_`, `evt_` |
 | Fechas | `number`, epoch en milisegundos. Nunca `Date` ni ISO string |
 | Nombres de campo | `camelCase` en el contrato, aunque la columna sea `snake_case` |
 | Campos opcionales | `?` solo cuando la ausencia es semántica, no cuando el valor puede ser vacío |
 
 ## Regla de exposición
 
-Tres campos existen en la base de datos y **nunca** aparecen en un DTO:
+Dos campos existen en la base de datos y **nunca** aparecen en un DTO:
 
 | Campo | Motivo |
 |---|---|
 | `session_token` | credencial de sesión |
 | `recovery_code` | permite recuperar una identidad |
-| `bio_raw` sin procesar de terceros | se expone como `bio`, y solo en el perfil propio o público según lo publique la persona |
+
+Ambos se devuelven una sola vez, en la respuesta que los acuña ([05](05-rest-api.md)), y no vuelven a viajar en ningún sobre ni en ninguna lectura.
+
+`bio` sí es público. Es el texto que la persona escribió para presentarse y viaja en `PersonDTO` a todo el mundo, coherente con que `GET /v1/graph` no tenga autenticación y con que la red sea información abierta: quien participa elige qué escribe, no quién lo lee.
 
 El backend construye los DTO con un mapeador explícito. No serializa filas de base de datos directamente: una columna nueva no debe filtrarse al contrato por omisión.
 
@@ -59,19 +62,16 @@ export type SkillCategory =
   | 'design'   | 'product' | 'infra'  | 'other';
 ```
 
-Dos especializaciones de `SkillRef`, una por cada arista que lo referencia:
+Una especialización de `SkillRef`, para la única arista que añade un atributo propio:
 
 ```ts
-/** Arista HAS_SKILL: qué sabe una persona y con qué profundidad. */
-export type PersonSkill = SkillRef & {
-  level: 1 | 2 | 3;
-};
-
 /** Arista NEEDS: qué le falta a un equipo y con qué prioridad. */
 export type NeedRef = SkillRef & {
   priority: 'required' | 'nice';
 };
 ```
+
+`HAS_SKILL` no tiene atributos: lo que una persona sabe se representa con `SkillRef` a secas. El scoring no pondera por profundidad ([06](06-matchmaker-agent.md)) y ninguna ruta acepta un valor que la exprese, así que un campo de nivel no tendría origen ni consumidor.
 
 ## DTOs de dominio
 
@@ -179,24 +179,24 @@ Quitar cualquiera de esos cuatro campos rompe las notificaciones en silencio: el
 
 ## Payloads de mensaje
 
-Union discriminada por `type`. El sobre base (`Envelope`, `ActorRef`, `FeedLine`, `GraphPatch`) está en [03](03-portal-contract.md).
+Union discriminada por `type`. El sobre base (`Envelope`, `ActorRef`, `FeedLine`, `GraphPatch`) está en [03](03-portal-contract.md), junto con los dos alias que lo estrechan ([ADR-010](01-decisions.md#adr-010--el-sobre-distingue-eventos-de-grafo-de-eventos-de-canal-privado)).
 
 ```ts
 export type MainEvent =
-  | Envelope<'person.upserted',       { person: PersonDTO; skills: PersonSkill[] }>
-  | Envelope<'person.status_changed', { personId: string; status: PersonStatus; previous: PersonStatus }>
-  | Envelope<'idea.published',        { idea: IdeaDTO }>
-  | Envelope<'team.created',          { team: TeamDTO }>
-  | Envelope<'team.updated',          { team: TeamDTO }>
-  | Envelope<'team.member_joined',    { teamId: string; person: PersonRef; status: TeamStatus }>
-  | Envelope<'team.member_left',      { teamId: string; personId: string; status: TeamStatus }>
-  | Envelope<'match.suggested',       { suggestion: SuggestionDTO }>
-  | Envelope<'match.expired',         { suggestionId: string }>;
+  | MainEnvelope<'person.upserted',       { person: PersonDTO; skills: SkillRef[] }>
+  | MainEnvelope<'person.status_changed', { personId: string; status: PersonStatus; previous: PersonStatus }>
+  | MainEnvelope<'idea.published',        { idea: IdeaDTO }>
+  | MainEnvelope<'team.created',          { team: TeamDTO }>
+  | MainEnvelope<'team.updated',          { team: TeamDTO }>
+  | MainEnvelope<'team.member_joined',    { teamId: string; person: PersonRef; status: TeamStatus }>
+  | MainEnvelope<'team.member_left',      { teamId: string; personId: string; status: TeamStatus }>
+  | MainEnvelope<'match.suggested',       { suggestion: SuggestionDTO }>
+  | MainEnvelope<'match.expired',         { suggestionId: string }>;
 
 export type TeamEvent =
-  | Envelope<'application.created',   { application: ApplicationDTO }>
-  | Envelope<'application.resolved',  { application: ApplicationDTO }>
-  | Envelope<'team.need_changed',     { teamId: string; needs: NeedRef[] }>;
+  | TeamEnvelope<'application.created',   { application: ApplicationDTO }>
+  | TeamEnvelope<'application.resolved',  { application: ApplicationDTO }>
+  | TeamEnvelope<'team.need_changed',     { teamId: string; needs: NeedRef[] }>;
 
 export type AnyEvent = MainEvent | TeamEvent;
 ```
@@ -208,10 +208,18 @@ Los sobres de `TeamEvent` no llevan `graph`: no afectan al grafo público ([03](
 ## Respuestas REST
 
 ```ts
-export type SessionResponse = {
+/** POST /v1/people — acuña identidad y perfil en el mismo acto. */
+export type CreatePersonResponse = {
+  person: PersonDTO;
+  skills: SkillRef[];
+  sessionToken: string;            // se devuelve una vez, aquí
+  recoveryCode: string;            // se muestra una vez, aquí
+};
+
+/** POST /v1/session/recover */
+export type RecoverSessionResponse = {
   personId: string;
-  sessionToken: string;
-  recoveryCode: string;            // se muestra una vez, al crear la identidad
+  sessionToken: string;            // nuevo; el anterior queda anulado
 };
 
 export type PortalTokenResponse = {
@@ -257,10 +265,10 @@ export type ApiError = {
 ```
 packages/contracts/
   src/
-    primitives.ts    PersonRef · TeamRef · SkillRef · PersonSkill · NeedRef · enums
+    primitives.ts    PersonRef · TeamRef · SkillRef · NeedRef · enums
     dto.ts           PersonDTO · TeamDTO · IdeaDTO · ApplicationDTO · SuggestionDTO
     graph.ts         GraphNode · GraphEdge · GraphPatch
-    envelope.ts      Envelope · ActorRef · FeedLine
+    envelope.ts      Envelope · MainEnvelope · TeamEnvelope · ActorRef · FeedLine
     events.ts        MainEvent · TeamEvent · AnyEvent
     rest.ts          respuestas REST · ApiError · ErrorCode
     index.ts

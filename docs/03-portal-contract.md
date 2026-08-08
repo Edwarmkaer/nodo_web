@@ -31,13 +31,18 @@ Todo mensaje publicado por el backend cumple:
 type Envelope<T extends string, P> = {
   v: 1;                    // versión del contrato
   type: T;                 // discriminante
-  id: string;              // uuid del evento de dominio (idempotencia)
+  id: string;              // id del evento de dominio, prefijo evt_ (idempotencia)
   at: number;              // epoch ms del servidor
   actor: ActorRef;         // quién lo provocó
   payload: P;
   summary: FeedLine;       // línea lista para el feed
-  graph: GraphPatch;       // parche a aplicar al grafo
+  graph?: GraphPatch;      // parche a aplicar al grafo
 };
+
+// Los sobres se publican siempre a través de uno de estos dos alias,
+// nunca del tipo base. Ver ADR-010.
+type MainEnvelope<T extends string, P> = Envelope<T, P> & { graph: GraphPatch };
+type TeamEnvelope<T extends string, P> = Envelope<T, P> & { graph?: never };
 
 type ActorRef =
   | { kind: 'person'; id: string; handle: string; displayName: string }
@@ -90,7 +95,7 @@ Todos persistentes salvo indicación. Los tipos del payload están definidos en 
 
 | `type` | Payload | Parche típico |
 |---|---|---|
-| `person.upserted` | `{ person: PersonDTO; skills: PersonSkill[] }` | nodo `person` + aristas `has_skill` |
+| `person.upserted` | `{ person: PersonDTO; skills: SkillRef[] }` | nodo `person` + aristas `has_skill` |
 | `person.status_changed` | `{ personId, status, previous }` | upsert del nodo (cambia `status`) |
 | `idea.published` | `{ idea: IdeaDTO }` | nodo `idea` + arista `authored` |
 | `team.created` | `{ team: TeamDTO }` | nodos `team` + `leads`, `member_of`, `needs` |
@@ -117,15 +122,18 @@ Todos persistentes salvo indicación. Los tipos del payload están definidos en 
     "suggestion": {
       "id": "sug_01J8K...",
       "personId": "per_camilo",
+      "personName": "Camilo",
       "teamId": "tm_healthai",
+      "teamName": "Health AI",
       "score": 7,
       "direction": "team_needs_person",
       "matchedSkills": [
-        { "slug": "go",       "priority": "required" },
-        { "slug": "angular",  "priority": "required" }
+        { "slug": "go",      "label": "Go",      "category": "backend",  "priority": "required" },
+        { "slug": "angular", "label": "Angular", "category": "frontend", "priority": "required" }
       ],
       "rationale": "Camilo domina Angular y Go, exactamente los dos perfiles que Health AI marcó como imprescindibles. Ambos trabajan en español.",
-      "expiresAt": 1754607200000
+      "expiresAt": 1754607200000,
+      "createdAt": 1754600000000
     }
   },
   "summary": {
@@ -146,6 +154,8 @@ Todos persistentes salvo indicación. Los tipos del payload están definidos en 
 }
 ```
 
+`personName` y `teamName` no son adorno: el bridge `notify` construye con ellos el título del `InboxItem` y no tiene acceso a la base de datos para resolverlos ([09](09-contracts.md)). Un sobre sin ellos publica bien y no notifica a nadie.
+
 `rationale` **siempre** nombra skills concretos. Un rationale genérico ("parecen compatibles") es un bug, no un texto flojo — ver el guardarraíl en [06](06-matchmaker-agent.md).
 
 ## Tipos de mensaje — `team-{teamId}`
@@ -158,7 +168,7 @@ Todos persistentes salvo indicación. Los tipos del payload están definidos en 
 
 `ApplicationDTO` embebe `person: PersonRef`, `teamName` y `leadId`, que son los datos que el bridge `notify` necesita para resolver destinatario y título sin consultar la base de datos ([09](09-contracts.md)).
 
-Estos sobres **no llevan `graph`**: no afectan al grafo público.
+Estos sobres **no llevan `graph`**: no afectan al grafo público. Se construyen con `TeamEnvelope`, que lo prohíbe en tiempo de compilación ([ADR-010](01-decisions.md#adr-010--el-sobre-distingue-eventos-de-grafo-de-eventos-de-canal-privado)).
 
 ## Notificaciones personales (inbox)
 
@@ -268,15 +278,22 @@ El claim `teams` se calcula al emitir el JWT y por eso el token es **de vida cor
 Secuencia obligatoria. Está aquí porque el backend la provee.
 
 ```
-1. POST /v1/session            → { personId, sessionToken }         (una vez, en localStorage)
+1. POST /v1/people             → { person, skills, sessionToken, recoveryCode }
+                                                                    (una vez, en localStorage)
 2. POST /v1/portal/token       → { token, expiresIn }               (async callback, refrescable)
 3. GET  /v1/graph              → { nodes, edges, seq }              snapshot completo
 4. subscribe('network-main') → aplicar parches con seq > snapshot.seq
 ```
 
+El paso 1 acuña identidad y perfil en el mismo acto, así que es la única ruta sin autenticar de las cuatro ([ADR-006](01-decisions.md#adr-006--identidad-sin-contraseñas)). Quien ya tiene un `recoveryCode` y perdió el `localStorage` entra por `POST /v1/session/recover` y sigue desde el paso 2.
+
 **Nunca** pasar el token como string estático al SDK: un string no se refresca y a los 15 min aparece `TokenExpiredError`. Se pasa un callback `async`.
 
+**Refresco tras solicitar.** El claim `teams` se calcula al emitir el JWT, así que quien acaba de crear una `Application` no aparece como `applicant` en el token que tiene en memoria y `authz` le niega `team-{id}`. El cliente reinvoca su callback de token tras un `POST /v1/teams/:id/applications` con éxito. La notificación de `application.resolved` le llega igualmente al inbox —`notify` la dirige con `to`, sin depender de la suscripción—; lo que se pierde sin refrescar es el feed en vivo del equipo.
+
 **Detección de huecos:** cada sobre trae el `seq` de Portal. Si `seq_recibido > ultimo_seq + 1`, el cliente vuelve al paso 3. No intenta reconstruir desde el historial — el backfill es de 50 mensajes y no alcanza.
+
+La marca de agua es exclusivamente la de `network-main` ([ADR-009](01-decisions.md#adr-009--la-marca-de-agua-seq-es-la-de-network-main)). Los sobres de `team-*` no mutan el grafo, así que el cliente no lleva cuenta de sus huecos.
 
 ## Versionado
 

@@ -20,6 +20,10 @@ build/
 # Portal
 .portal/
 
+# Postgres local de desarrollo (pglite), ver apps/api/scripts/dev-postgres.ts
+.pglite-data/
+.pglite-data.corrupted-*/
+
 # Sistema y editor
 .DS_Store
 *.log

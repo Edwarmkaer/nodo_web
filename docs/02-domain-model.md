@@ -62,7 +62,7 @@ erDiagram
         text status
     }
 
-    PERSON     }o--o{ SKILL      : "HAS_SKILL, level 1-3"
+    PERSON     }o--o{ SKILL      : "HAS_SKILL"
     TEAM       }o--o{ SKILL      : "NEEDS, required o nice"
     PERSON     |o--o| TEAM       : "MEMBER_OF, 0..1 por Person"
     PERSON     ||--o| TEAM       : "LEADS"
@@ -96,7 +96,7 @@ La categoría cumple dos funciones: agrupa el grafo visualmente y sostiene el sc
 
 | Arista | Origen → Destino | Atributos | Cardinalidad |
 |---|---|---|---|
-| `HAS_SKILL` | Person → Skill | `level` 1–3 | 0..n |
+| `HAS_SKILL` | Person → Skill | — | 0..n |
 | `NEEDS` | Team → Skill | `priority` (`required`\|`nice`) | 0..n |
 | `MEMBER_OF` | Person → Team | `role`, `joined_at` | **0..1 por Person** |
 | `LEADS` | Person → Team | — | 0..1 por Team |
@@ -129,7 +129,18 @@ stateDiagram-v2
 
 ### Team.status
 
-Derivado del estado de membresías y necesidades. `building` es el único que se escribe explícitamente y prevalece sobre el cálculo, para que un líder pueda cerrar el equipo con menos de 4 integrantes.
+Derivado del conteo de miembros y de `frozen`. `building` es el único que se escribe explícitamente y prevalece sobre el cálculo, para que un líder pueda cerrar el equipo con menos de `max_size` integrantes.
+
+**La derivación es una cascada y el primer caso que aplica gana.** El orden es parte de la definición: sin él, un equipo con `max_size - 1` integrantes y needs sin cubrir satisface dos condiciones a la vez.
+
+| Orden | Estado | Condición |
+|---|---|---|
+| 1 | `building` | `frozen = true`; lo marca el líder y congela el reclutamiento |
+| 2 | `complete` | `members = max_size` |
+| 3 | `almost_full` | `members = max_size - 1` |
+| 4 | `recruiting` | cualquier otro caso |
+
+`recruiting` es el caso por defecto y no exige que haya `NEEDS` required sin cubrir: un equipo con hueco está reclutando aunque todavía no haya declarado qué le falta. Un equipo sin needs no produce candidatos de todos modos, porque la consulta del matchmaker parte de sus aristas `NEEDS` ([06](06-matchmaker-agent.md)).
 
 ```mermaid
 stateDiagram-v2
@@ -143,12 +154,7 @@ stateDiagram-v2
     building --> recruiting : el líder reabre
 ```
 
-| Estado | Condición |
-|---|---|
-| `recruiting` | `members < max_size` y existe `NEEDS` required sin cubrir |
-| `almost_full` | `members = max_size - 1` |
-| `complete` | `members = max_size` |
-| `building` | marcado por el líder; congela el reclutamiento |
+Con `max_size = 4` el estado inicial es siempre `recruiting`, que es el caso normal. Dos configuraciones nacen en otro estado y la cascada las resuelve sin ambigüedad: con `max_size = 2` el equipo nace `almost_full` —tiene a su líder y le falta uno—, y con `max_size = 1` nace `complete`. Este último no recibe sugerencias nunca, por el guardarraíl 6 de [06](06-matchmaker-agent.md), que es el comportamiento correcto para un equipo de una sola persona.
 
 ### Application.status
 
@@ -168,12 +174,12 @@ Se aplican en la capa de servicio **y** con constraints en la base de datos. Un 
 | # | Invariante | Cómo se aplica |
 |---|---|---|
 | 1 | Una Person pertenece como máximo a un Team | índice único parcial sobre `edges(from_id) where kind='member_of'` |
-| 2 | Un Team nunca supera `max_size` (4) | validación en transacción; devuelve `409 TEAM_FULL` |
+| 2 | Un Team nunca supera su `max_size` (1–4, por defecto 4) | validación en transacción; devuelve `409 TEAM_FULL` |
 | 3 | El líder es miembro | `LEADS` y `MEMBER_OF` se insertan en la misma transacción |
 | 4 | Una sola Application `pending` por par (Person, Team) | índice único parcial; el reintento devuelve la existente |
 | 5 | Aceptar una Application propaga el estado completo | crea `MEMBER_OF`, pasa la Person a `teamed`, recalcula `Team.status`, marca `auto_rejected` las demás pendientes de esa persona e invalida sus Suggestions vivas |
 | 6 | Los Skills son vocabulario cerrado | un `slug` fuera de `skills` ∪ `skill_aliases` devuelve `422 UNKNOWN_SKILL` |
-| 7 | `Team.status` es derivado salvo `building` | se recalcula ante cualquier cambio de membresía o de needs |
+| 7 | `Team.status` es derivado salvo `building` | cascada de precedencia; se recalcula ante cualquier cambio de membresía o de `frozen` |
 | 8 | Una Suggestion caduca a las 2 h | `expires_at`; al caducar deja de dibujarse |
 | 9 | El agente no sugiere personas `teamed` ni `idle`, ni equipos `complete` o `building` | filtrado en SQL |
 

@@ -27,6 +27,24 @@ Cada uno asume cerrados los anteriores.
 
 Si una decisión posterior contradice un ADR, se escribe un ADR nuevo que lo supersede; el anterior no se edita. Así el acuerdo vigente es siempre verificable.
 
+## Registro de correcciones
+
+Revisión previa a la implementación de `@nodo/contracts`. Ningún ADR quedó superseded: las siete resoluciones cierran huecos o corrigen documentos que se habían desviado de un ADR vigente. Las dos decisiones que ninguna anterior cubría se registraron como ADR nuevos.
+
+| Qué se resolvió | Dónde |
+|---|---|
+| La identidad se acuña en `POST /v1/people`, no en un `POST /v1/session` previo; la recuperación pasa a `POST /v1/session/recover` | 03, 05, 09 — restablece lo que ya decía ADR-006 |
+| `Team.status` se deriva por cascada con precedencia explícita; `recruiting` es el caso por defecto | 02 |
+| `HAS_SKILL` pierde `level`: ninguna ruta lo producía ni ningún cálculo lo consumía | 02, 09 |
+| `matchedSkills` viaja con `label` y `category`; la consulta une `skills` | 03, 04, 06 |
+| El score completo y el umbral se calculan en SQL, antes del recorte | 04, 06 |
+| `bio` es público; se retira la condición que ninguna columna sostenía | 09 |
+| Los ids de arista son deterministas | 04 |
+| Semántica de la marca de agua `seq` | **ADR-009** |
+| Partición del sobre en `MainEnvelope` / `TeamEnvelope` | **ADR-010** |
+
+El ejemplo de `notify` en ADR-008 lee `content.leadId` donde el payload es `{ application }`. No se edita, por la regla de arriba: la versión vigente y correcta es la de [03](03-portal-contract.md).
+
 ## Principio rector
 
 > **El backend nunca sostiene una conexión de tiempo real.**
@@ -45,12 +63,16 @@ pnpm dev
 
 Runtime Node 22 + pnpm, idéntico en local y en producción.
 
+## Estado de la implementación
+
+El backend está escrito: `@nodo/contracts`, esquema y migraciones, dominio, agente MatchMaker, publicación a Portal, rutas HTTP y `portal.config.ts`, con 74 pruebas en verde (`pnpm test`). No se ha ejecutado contra una Postgres real en este entorno — ver [10](10-testing.md) para qué nivel de prueba requiere cuál dependencia.
+
 ## Pendiente
 
 | Tarea | Por qué bloquea |
 |---|---|
-| Completar el vocabulario a ~70 skills | todo el matching depende de él |
-| Ampliar la tabla de alias | sostiene la precisión de la extracción por LLM |
-| Calibrar `MATCH_SCORE_THRESHOLD` con datos de semilla | gobierna el volumen de sugerencias del agente |
+| Calibrar `MATCH_SCORE_THRESHOLD` con tráfico real | gobierna el volumen de sugerencias del agente; no se puede fijar de forma teórica |
+| Verificar `authz`/`notify` de `portal.config.ts` contra un cliente real | docs/10: es la única verificación que queda manual, deliberadamente |
+| Provisionar Portal y ejecutar `portal deploy` | [08](08-operations.md): prerrequisito de despliegue, no de código |
 
-Ambas son tareas de contenido y ajuste. **No queda diseño pendiente.**
+El vocabulario (75 skills, 141 alias) y las migraciones ya están escritos y sembrados por `pnpm db:seed`. **No queda diseño ni código pendiente** — lo que resta es operar el sistema contra servicios reales.

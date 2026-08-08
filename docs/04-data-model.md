@@ -91,6 +91,10 @@ erDiagram
         int    attempts
         bool   published
     }
+    CHANNEL_WATERMARKS {
+        text   channel PK
+        bigint seq
+    }
 
     NODES  ||--o{ EDGES         : "from_id"
     NODES  ||--o{ EDGES         : "to_id"
@@ -107,7 +111,7 @@ erDiagram
 
 `SKILLS` no participa en el grafo por clave foránea: las aristas `has_skill` y `needs` apuntan al `slug` a través de `edges.to_id`, igual que cualquier otro nodo. Los skills se insertan también en `nodes` durante el seed.
 
-`PROCESSED_EVENTS` y `OUTBOX` son infraestructura y no tienen relación con el grafo.
+`PROCESSED_EVENTS`, `OUTBOX` y `CHANNEL_WATERMARKS` son infraestructura y no tienen relación con el grafo.
 
 ## Esquema
 
@@ -250,46 +254,86 @@ create table outbox (
   created_at timestamptz not null default now()
 );
 create index on outbox (published, created_at) where not published;
+
+-- Marca de agua por canal, para el `seq` de GET /v1/graph (ver ADR-009).
+-- Se actualiza en cada publicación con éxito; `outbox` solo registra los fallos
+-- y por eso no puede sostenerla.
+create table channel_watermarks (
+  channel     text primary key,
+  seq         bigint not null,
+  updated_at  timestamptz not null default now()
+);
 ```
+
+## Identificadores de arista
+
+`edges.id` es **determinista**, derivado de la propia arista: `{kind}:{from_id}:{to_id}`. Las de `suggested` son la excepción y usan el id de la sugerencia, para que `match.expired` pueda quitarlas por `removeEdges` con el `suggestionId` que ya lleva en el payload.
+
+No es cosmético. El `GraphPatch` hace upsert por `id` ([03](03-portal-contract.md)), así que una arista borrada y recreada con id aleatorio deja un duplicado permanente en el grafo de cualquier cliente que se perdiera el `removeEdges` correspondiente. Con id determinista, el mismo hecho del dominio produce siempre la misma fila y el mismo parche, y la reaplicación es inocua.
 
 ## La consulta central
 
 La que corre el MatchMaker en cada disparo. Ver [06](06-matchmaker-agent.md) para el scoring y los guardarraíles.
 
 ```sql
--- Candidatos para un equipo: personas 'looking', sin equipo,
--- rankeadas por solapamiento ponderado con las needs del equipo.
-select
-  p.id,
-  p.label,
-  sum(case when e_need.meta->>'priority' = 'required' then 2 else 1 end) as score,
-  jsonb_agg(jsonb_build_object(
-    'slug',     e_need.to_id,
-    'priority', e_need.meta->>'priority'
-  )) as matched_skills
-from edges  e_need
-join edges  e_skill on e_skill.kind = 'has_skill'
-                   and e_skill.to_id = e_need.to_id
-join nodes  p        on p.id = e_skill.from_id
-where e_need.kind    = 'needs'
-  and e_need.from_id = $1              -- team_id
-  and p.kind         = 'person'
-  and p.status       = 'looking'
-  and not exists (
-    select 1 from edges m
-     where m.kind = 'member_of' and m.from_id = p.id
-  )
-group by p.id, p.label
-having count(*) > 0
-order by score desc, p.created_at asc
+-- Candidatos para un equipo: personas 'looking', sin equipo, rankeadas por el
+-- score completo de 06. El umbral se aplica antes del recorte, no después.
+-- $1 = team_id · $2 = idioma del equipo · $3 = MATCH_SCORE_THRESHOLD
+select *
+from (
+  select
+    p.id,
+    p.label,
+    p.created_at,
+      sum(case when e_need.meta->>'priority' = 'required' then 2 else 1 end)
+    + (case when pe.availability = 'full' then 1 else 0 end)
+    + (case when pe.language     = $2     then 1 else 0 end)   as score,
+    jsonb_agg(jsonb_build_object(
+      'slug',     s.slug,
+      'label',    s.label,
+      'category', s.category,
+      'priority', e_need.meta->>'priority'
+    )) as matched_skills
+  from edges  e_need
+  join edges  e_skill on e_skill.kind  = 'has_skill'
+                     and e_skill.to_id = e_need.to_id
+  join nodes  p       on p.id   = e_skill.from_id
+  join people pe      on pe.id  = p.id
+  join skills s       on s.slug = e_need.to_id
+  where e_need.kind    = 'needs'
+    and e_need.from_id = $1
+    and p.kind         = 'person'
+    and p.status       = 'looking'
+    and not exists (
+      select 1 from edges m
+       where m.kind = 'member_of' and m.from_id = p.id
+    )
+  group by p.id, p.label, p.created_at, pe.availability, pe.language
+) c
+where c.score >= $3
+order by c.score desc, c.created_at asc
 limit 5;
 ```
+
+Tres detalles de la consulta cargan el diseño de [06](06-matchmaker-agent.md) y no son opcionales:
+
+- **El score se calcula entero aquí**, con los bonus de disponibilidad e idioma incluidos. Si el recorte a 5 ocurriera sobre el solapamiento de skills a secas, los bonus solo desempatarían dentro de un conjunto ya elegido y el resultado dejaría de ser el mejor.
+- **El umbral filtra antes del `limit`**, en la envoltura. Así `limit 5` significa "los cinco mejores que superan el umbral" y no "de los cinco primeros, los que lo superen".
+- **`join skills`** completa `label` y `category` en `matched_skills`, que es la forma que exige `SuggestionDTO.matchedSkills` ([09](09-contracts.md)).
+
+El idioma del equipo es el de su líder: `teams` no tiene columna propia de idioma y el equipo no es un hablante. Se resuelve en la misma transacción que dispara al agente y viaja como `$2`.
 
 La dirección inversa (persona → equipos) es la misma consulta con el `where` intercambiado. Ambas están en [06](06-matchmaker-agent.md).
 
 ## Snapshot del grafo
 
-`GET /v1/graph` son dos consultas y cero ensamblaje:
+`GET /v1/graph` son tres consultas y cero ensamblaje. **El orden importa:** la marca de agua se lee primero.
+
+```sql
+select seq from channel_watermarks where channel = 'network-main';
+```
+
+Leyéndola antes, el peor caso es que el cliente reaplique un parche que el snapshot ya incluía, y el upsert por `id` es idempotente. Al revés, una publicación colada entre ambas lecturas produciría un parche que el cliente descarta por `seq` y que el snapshot no traía ([ADR-009](01-decisions.md#adr-009--la-marca-de-agua-seq-es-la-de-network-main)).
 
 ```sql
 select id, kind, label, status, meta from nodes;

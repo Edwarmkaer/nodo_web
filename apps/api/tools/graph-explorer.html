@@ -1,0 +1,815 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<title>Nodo — Graph Explorer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<style>
+  :root {
+    --bg: #14161a;
+    --panel: #1b1e24;
+    --panel-2: #22262e;
+    --border: #2c313b;
+    --text: #e6e8eb;
+    --text-dim: #8b93a1;
+    --accent: #5b8cff;
+
+    --c-person: #4c6ef5;
+    --c-team: #12b886;
+    --c-idea: #f59f00;
+    --c-skill: #868e96;
+    --c-agent: #e64980;
+    --c-suggested: #ff922b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow: hidden; }
+
+  #app { display: flex; flex-direction: column; height: 100%; }
+
+  header {
+    display: flex; align-items: center; gap: 14px;
+    height: 52px; padding: 0 16px; background: var(--panel);
+    border-bottom: 1px solid var(--border); flex: none;
+  }
+  header .title { font-weight: 700; font-size: 14px; letter-spacing: .2px; }
+  header .title span { color: var(--text-dim); font-weight: 400; }
+  header .sep { width: 1px; height: 24px; background: var(--border); }
+  header input[type=text] {
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 6px 10px; font: inherit; width: 260px;
+  }
+  header button {
+    background: var(--accent); color: white; border: none; border-radius: 6px;
+    padding: 7px 14px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  header button:hover { filter: brightness(1.1); }
+  header button.ghost { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
+  #status { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--text-dim); font-size: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #868e96; flex: none; }
+  .dot.ok { background: #2f9e44; box-shadow: 0 0 6px #2f9e4488; }
+  .dot.err { background: #e03131; box-shadow: 0 0 6px #e0313188; }
+  #sidebar input[type=text] {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 6px 8px; font: inherit; margin-bottom: 6px;
+  }
+  #sidebar button.full {
+    width: 100%; background: var(--accent); color: white; border: none; border-radius: 6px;
+    padding: 7px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  #realtime-status { margin-top: 8px; display: flex; align-items: center; gap: 6px; color: var(--text-dim); font-size: 12px; }
+
+  main { display: flex; flex: 1; min-height: 0; }
+
+  #sidebar {
+    width: 250px; flex: none; background: var(--panel); border-right: 1px solid var(--border);
+    padding: 14px; overflow-y: auto;
+  }
+  #sidebar h3 { margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-dim); }
+  .legend-row {
+    display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px;
+    cursor: pointer; user-select: none;
+  }
+  .legend-row:hover { background: var(--panel-2); }
+  .legend-row.off { opacity: .35; }
+  .legend-row .swatch { width: 12px; height: 12px; border-radius: 50%; flex: none; }
+  .legend-row .label { flex: 1; }
+  .legend-row .count { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .legend-divider { height: 1px; background: var(--border); margin: 14px 0; }
+  .toggle-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; }
+  .toggle-row input { accent-color: var(--accent); }
+
+  #canvas-wrap { flex: 1; position: relative; min-width: 0; }
+  svg { width: 100%; height: 100%; display: block; cursor: grab; }
+  svg:active { cursor: grabbing; }
+
+  .edge { stroke: #4b5261; stroke-width: 1.4; fill: none; }
+  .edge.suggested { stroke: var(--c-suggested); stroke-width: 1.8; stroke-dasharray: 5 4; animation: dash 1.2s linear infinite; }
+  @keyframes dash { to { stroke-dashoffset: -18; } }
+  .node circle { cursor: pointer; }
+  .node circle.visible-circle { stroke: #0b0c0f; stroke-width: 1.5; }
+  .node text { fill: var(--text); font-size: 10px; pointer-events: none; paint-order: stroke; stroke: #0b0c0f; stroke-width: 3px; }
+  .node.dimmed { opacity: .12; }
+  .edge.dimmed { opacity: .08; }
+  .node.hit circle.visible-circle { stroke: #ffd43b; stroke-width: 3px; }
+
+  #empty-hint {
+    position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    color: var(--text-dim); flex-direction: column; gap: 8px; text-align: center; padding: 20px;
+  }
+
+  #inspector {
+    width: 300px; flex: none; background: var(--panel); border-left: 1px solid var(--border);
+    padding: 16px; overflow-y: auto; display: none;
+  }
+  #inspector.open { display: block; }
+  #inspector h3 { margin: 0 0 4px; font-size: 15px; }
+  #inspector .kind-badge {
+    display: inline-block; font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+    padding: 2px 8px; border-radius: 20px; margin-bottom: 12px; font-weight: 700;
+  }
+  #inspector table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  #inspector td { padding: 5px 0; vertical-align: top; border-bottom: 1px solid var(--border); }
+  #inspector td.k { color: var(--text-dim); width: 90px; padding-right: 8px; }
+  #inspector td.v { word-break: break-word; font-family: ui-monospace, monospace; }
+  #inspector .close { float: right; background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 16px; }
+  #inspector .related { margin-top: 16px; }
+  #inspector .related h4 { font-size: 11px; text-transform: uppercase; color: var(--text-dim); margin: 0 0 6px; }
+  #inspector .related-item { padding: 6px 8px; border-radius: 6px; cursor: pointer; display: flex; gap: 8px; align-items: center; }
+  #inspector .related-item:hover { background: var(--panel-2); }
+  #inspector .related-item .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+
+  .chat-panel { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+  .chat-panel h4 { font-size: 11px; text-transform: uppercase; color: var(--text-dim); margin: 0 0 8px; }
+  .chat-panel .hint { font-size: 11px; color: var(--text-dim); margin-bottom: 8px; line-height: 1.4; }
+  .chat-messages { max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+  .chat-msg { padding: 6px 10px; border-radius: 10px; font-size: 12px; line-height: 1.4; max-width: 90%; }
+  .chat-msg.user { align-self: flex-end; background: var(--accent); color: white; }
+  .chat-msg.assistant { align-self: flex-start; background: var(--panel-2); color: var(--text); }
+  .chat-input-row { display: flex; gap: 6px; }
+  .chat-input-row input {
+    flex: 1; background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 6px 8px; font: inherit;
+  }
+  .chat-input-row button {
+    background: var(--accent); color: white; border: none; border-radius: 6px;
+    padding: 0 12px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .chat-input-row button:disabled { opacity: .5; cursor: default; }
+
+  /* ─── Panel de demo: crear perfil ───────────────────────────────────────── */
+  #demo-panel {
+    width: 260px; flex: none; background: var(--panel); border-right: 1px solid var(--border);
+    padding: 14px; overflow-y: auto;
+  }
+  #demo-panel h3 { margin: 0 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-dim); }
+  #demo-panel .hint { font-size: 11px; color: var(--text-dim); line-height: 1.4; margin-bottom: 12px; }
+  #demo-panel label { display: block; font-size: 11px; color: var(--text-dim); margin: 10px 0 4px; }
+  #demo-panel input, #demo-panel select {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 6px 8px; font: inherit;
+  }
+  #demo-panel button.full {
+    width: 100%; margin-top: 14px; background: var(--accent); color: white; border: none; border-radius: 6px;
+    padding: 8px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  #demo-panel button.full:disabled { opacity: .5; cursor: default; }
+  #demo-result { margin-top: 10px; font-size: 12px; line-height: 1.5; }
+  #demo-result.ok { color: #63e6a4; }
+  #demo-result.err { color: #ff8787; }
+
+  /* ─── Chat flotante sobre el grafo en general ───────────────────────────── */
+  #floating-chat-toggle {
+    position: fixed; bottom: 20px; right: 20px; z-index: 60;
+    width: 52px; height: 52px; border-radius: 50%; border: none;
+    background: var(--accent); color: white; font-size: 22px; cursor: pointer;
+    box-shadow: 0 4px 14px #0007;
+  }
+  #floating-chat-panel {
+    position: fixed; bottom: 84px; right: 20px; z-index: 60;
+    width: 320px; max-height: 420px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; box-shadow: 0 8px 30px #000a; display: none; flex-direction: column; overflow: hidden;
+  }
+  #floating-chat-panel.open { display: flex; }
+  #floating-chat-panel .chat-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 12px; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 13px;
+  }
+  #floating-chat-panel .chat-header button { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 16px; }
+  #floating-chat-panel .chat-messages { flex: 1; padding: 10px 12px; max-height: 300px; }
+  #floating-chat-panel .chat-input-row { padding: 10px 12px; border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="title">Nodo <span>— Graph Explorer</span></div>
+    <div class="sep"></div>
+    <input id="base-url" type="text" value="http://localhost:8080" />
+    <button id="refresh">↻ Actualizar</button>
+    <button id="reset-view" class="ghost">Centrar</button>
+    <input id="search" type="text" placeholder="Buscar por nombre…" style="width:180px" />
+    <div id="status"><span class="dot"></span><span id="status-text">sin conectar</span></div>
+  </header>
+  <main>
+    <div id="demo-panel">
+      <h3>Crear perfil (demo)</h3>
+      <div class="hint">Nodo no tiene login: crear el perfil acuña la identidad en el mismo acto, sin contraseña (ADR-006). Esto es exactamente <code>POST /v1/people</code>.</div>
+      <label for="demo-name">Nombre</label>
+      <input id="demo-name" type="text" placeholder="Ej: Valentina Ríos" />
+      <label for="demo-handle">Handle</label>
+      <input id="demo-handle" type="text" placeholder="valentina-rios" />
+      <label for="demo-skills">Skills (separados por coma)</label>
+      <input id="demo-skills" type="text" placeholder="go, figma" />
+      <label for="demo-availability">Disponibilidad</label>
+      <select id="demo-availability">
+        <option value="full">full</option>
+        <option value="partial">partial</option>
+        <option value="evenings">evenings</option>
+      </select>
+      <label for="demo-language">Idioma</label>
+      <select id="demo-language">
+        <option value="es">es</option>
+        <option value="en">en</option>
+      </select>
+      <button id="demo-submit" class="full">Crear perfil</button>
+      <div id="demo-result"></div>
+    </div>
+    <div id="sidebar">
+      <h3>Nodos</h3>
+      <div id="legend-nodes"></div>
+      <div class="legend-divider"></div>
+      <h3>Aristas</h3>
+      <div class="toggle-row"><input type="checkbox" id="toggle-suggested" checked><label for="toggle-suggested">Sugerencias del agente</label></div>
+      <div class="toggle-row"><input type="checkbox" id="toggle-others" checked><label for="toggle-others">Resto de aristas</label></div>
+      <div class="toggle-row"><input type="checkbox" id="toggle-isolated" checked><label for="toggle-isolated">Ocultar nodos sin aristas</label></div>
+      <div class="legend-divider"></div>
+      <h3>Snapshot</h3>
+      <div id="meta-info" style="color:var(--text-dim); line-height:1.8;"></div>
+      <div class="legend-divider"></div>
+      <h3>Tiempo real (Portal)</h3>
+      <input id="portal-pk" type="text" placeholder="pk_..." />
+      <button id="connect-realtime" class="full">Conectar</button>
+      <div id="realtime-status"><span class="dot" id="realtime-dot"></span><span id="realtime-text">desconectado — usando snapshot</span></div>
+    </div>
+    <div id="canvas-wrap">
+      <svg></svg>
+      <div id="empty-hint">
+        <div style="font-size:32px;">◌</div>
+        <div>Sin datos todavía.<br>Pulsa <b>Actualizar</b> con el backend corriendo.</div>
+      </div>
+    </div>
+    <div id="inspector"></div>
+  </main>
+  <button id="floating-chat-toggle">💬</button>
+  <div id="floating-chat-panel">
+    <div class="chat-header">
+      <span>Preguntar sobre el grafo</span>
+      <button id="floating-chat-close">✕</button>
+    </div>
+    <div class="chat-messages" id="floating-chat-messages"></div>
+    <div class="chat-input-row">
+      <input type="text" id="floating-chat-input" placeholder="Ej: ¿quién busca equipo?" />
+      <button id="floating-chat-send">➤</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const KIND_COLOR = { person: 'var(--c-person)', team: 'var(--c-team)', idea: 'var(--c-idea)', skill: 'var(--c-skill)', agent: 'var(--c-agent)' };
+const KIND_RESOLVED = { person: '#4c6ef5', team: '#12b886', idea: '#f59f00', skill: '#868e96', agent: '#e64980' };
+const KIND_LABEL = { person: 'Persona', team: 'Equipo', idea: 'Idea', skill: 'Skill', agent: 'Agente' };
+const KIND_RADIUS = { person: 9, team: 10, idea: 8, skill: 5, agent: 11 };
+
+let state = { nodes: [], edges: [], seq: 0 };
+let visibleKinds = new Set(Object.keys(KIND_COLOR));
+let showSuggested = true, showOthers = true;
+let hideIsolated = true; // el vocabulario trae ~70 skills; la mayoría no está en uso todavía
+let selected = null;
+
+const svg = d3.select('svg');
+const zoomLayer = svg.append('g');
+const zoomBehavior = d3.zoom().scaleExtent([0.15, 4]).on('zoom', (ev) => zoomLayer.attr('transform', ev.transform));
+svg.call(zoomBehavior);
+// El layout de fuerzas converge alrededor de (0,0) en espacio de simulación;
+// sin esta transformación inicial, (0,0) cae en la esquina superior
+// izquierda del SVG en vez del centro visible.
+function centerTransform() {
+  const { w, h } = dims();
+  return d3.zoomIdentity.translate(w / 2, h / 2);
+}
+svg.call(zoomBehavior.transform, centerTransform());
+
+const edgeLayer = zoomLayer.append('g').attr('class', 'edges');
+const nodeLayer = zoomLayer.append('g').attr('class', 'nodes');
+
+const simulation = d3.forceSimulation()
+  .force('link', d3.forceLink().id(d => d.id).distance(70).strength(0.4))
+  .force('charge', d3.forceManyBody().strength(-160))
+  .force('collide', d3.forceCollide().radius(d => (KIND_RADIUS[d.kind] || 6) + 8))
+  .force('center', d3.forceCenter(0, 0))
+  .alphaDecay(0.02);
+
+function dims() {
+  const r = document.getElementById('canvas-wrap').getBoundingClientRect();
+  return { w: r.width, h: r.height };
+}
+
+async function fetchGraph() {
+  const base = document.getElementById('base-url').value.replace(/\/$/, '');
+  const statusDot = document.querySelector('#status .dot');
+  const statusText = document.getElementById('status-text');
+  try {
+    const res = await fetch(base + '/v1/graph');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    state = data;
+    statusDot.className = 'dot ok';
+    statusText.textContent = `conectado · seq ${data.seq}`;
+    render();
+  } catch (e) {
+    statusDot.className = 'dot err';
+    statusText.textContent = 'sin conexión (' + e.message + ')';
+  }
+}
+
+function edgeVisible(e) {
+  const kindsOk = visibleKinds.has(nodeById(e.from)?.kind) && visibleKinds.has(nodeById(e.to)?.kind);
+  if (!kindsOk) return false;
+  return e.kind === 'suggested' ? showSuggested : showOthers;
+}
+
+let nodeIndex = new Map();
+function nodeById(id) { return nodeIndex.get(id); }
+
+function computeDegree() {
+  const deg = new Map();
+  for (const e of state.edges) {
+    deg.set(e.from, (deg.get(e.from) || 0) + 1);
+    deg.set(e.to, (deg.get(e.to) || 0) + 1);
+  }
+  return deg;
+}
+
+function render() {
+  nodeIndex = new Map(state.nodes.map(n => [n.id, n]));
+  document.getElementById('empty-hint').style.display = state.nodes.length ? 'none' : 'flex';
+  renderLegend();
+  renderMeta();
+
+  const degree = computeDegree();
+  const visibleNodes = state.nodes.filter(n =>
+    visibleKinds.has(n.kind) && (!hideIsolated || (degree.get(n.id) || 0) > 0));
+  const visibleEdges = state.edges.filter(edgeVisible);
+
+  // Preserve simulation positions across refreshes, keyed by id.
+  const prevPos = new Map(simulation.nodes().map(n => [n.id, n]));
+  const nodesData = visibleNodes.map(n => Object.assign({}, prevPos.get(n.id), n));
+  const edgesData = visibleEdges.map(e => ({ ...e, source: e.from, target: e.to }));
+
+  const edgeSel = edgeLayer.selectAll('line.edge').data(edgesData, d => d.id);
+  edgeSel.exit().remove();
+  const edgeEnter = edgeSel.enter().append('line')
+    .attr('class', d => 'edge' + (d.kind === 'suggested' ? ' suggested' : ''))
+    .on('click', (ev, d) => { ev.stopPropagation(); showEdgeInspector(d); });
+  const edgeMerged = edgeEnter.merge(edgeSel)
+    .attr('class', d => 'edge' + (d.kind === 'suggested' ? ' suggested' : ''));
+
+  const nodeSel = nodeLayer.selectAll('g.node').data(nodesData, d => d.id);
+  nodeSel.exit().remove();
+  const nodeEnter = nodeSel.enter().append('g').attr('class', 'node')
+    .call(d3.drag()
+      .on('start', (ev, d) => { if (!ev.active) simulation.alphaTarget(0.25).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag', (ev, d) => { d.fx = ev.x; d.fy = ev.y; })
+      .on('end', (ev, d) => { if (!ev.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; }))
+    .on('click', (ev, d) => { ev.stopPropagation(); showNodeInspector(d); });
+  // Círculo invisible más grande solo para ampliar el área de clic/arrastre
+  // — los nodos de skill (radio 5) son difíciles de acertar si no.
+  nodeEnter.append('circle').attr('class', 'hit-area').attr('fill', 'transparent');
+  nodeEnter.append('circle').attr('class', 'visible-circle');
+  nodeEnter.append('text').attr('dy', 4).attr('text-anchor', 'middle');
+
+  const nodeMerged = nodeEnter.merge(nodeSel);
+  nodeMerged.select('circle.hit-area').attr('r', d => (KIND_RADIUS[d.kind] || 6) + 10);
+  nodeMerged.select('circle.visible-circle')
+    .attr('r', d => KIND_RADIUS[d.kind] || 6)
+    .attr('fill', d => KIND_RESOLVED[d.kind] || '#999')
+    .attr('opacity', d => d.status === 'idle' || d.status === 'expired' ? 0.45 : 1);
+  nodeMerged.select('text')
+    .attr('y', d => (KIND_RADIUS[d.kind] || 6) + 12)
+    .text(d => d.label.length > 16 ? d.label.slice(0, 15) + '…' : d.label);
+
+  simulation.nodes(nodesData).on('tick', ticked).on('end', () => fitView(nodesData));
+  simulation.force('link').links(edgesData);
+  simulation.alpha(0.6).restart();
+
+  function ticked() {
+    edgeMerged
+      .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+    nodeMerged.attr('transform', d => `translate(${d.x},${d.y})`);
+  }
+
+  applySearchHighlight();
+}
+
+/** Encuadra todos los nodos visibles en el viewport, como el "fit to view" de Neo4j Browser. */
+function fitView(nodesData) {
+  if (!nodesData || !nodesData.length) return;
+  const xs = nodesData.map(n => n.x), ys = nodesData.map(n => n.y);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const { w, h } = dims();
+  const gw = Math.max(x1 - x0, 1), gh = Math.max(y1 - y0, 1);
+  const scale = Math.min(3, 0.85 / Math.max(gw / w, gh / h));
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  const t = d3.zoomIdentity.translate(w / 2, h / 2).scale(scale).translate(-cx, -cy);
+  svg.transition().duration(500).call(zoomBehavior.transform, t);
+}
+
+function renderLegend() {
+  const counts = {};
+  for (const k of Object.keys(KIND_COLOR)) counts[k] = 0;
+  for (const n of state.nodes) counts[n.kind] = (counts[n.kind] || 0) + 1;
+
+  const el = document.getElementById('legend-nodes');
+  el.innerHTML = '';
+  for (const kind of Object.keys(KIND_COLOR)) {
+    const row = document.createElement('div');
+    row.className = 'legend-row' + (visibleKinds.has(kind) ? '' : ' off');
+    row.innerHTML = `<span class="swatch" style="background:${KIND_RESOLVED[kind]}"></span>
+      <span class="label">${KIND_LABEL[kind]}</span><span class="count">${counts[kind] || 0}</span>`;
+    row.onclick = () => {
+      visibleKinds.has(kind) ? visibleKinds.delete(kind) : visibleKinds.add(kind);
+      render();
+    };
+    el.appendChild(row);
+  }
+}
+
+function renderMeta() {
+  const suggested = state.edges.filter(e => e.kind === 'suggested').length;
+  document.getElementById('meta-info').innerHTML =
+    `nodos: ${state.nodes.length}<br>aristas: ${state.edges.length}<br>sugerencias vivas: ${suggested}<br>seq: ${state.seq}`;
+}
+
+function showNodeInspector(d) {
+  selected = d;
+  const el = document.getElementById('inspector');
+  el.classList.add('open');
+  const color = KIND_RESOLVED[d.kind] || '#999';
+  const related = state.edges.filter(e => e.from === d.id || e.to === d.id);
+  el.innerHTML = `
+    <button class="close" onclick="closeInspector()">✕</button>
+    <div class="kind-badge" style="background:${color}22; color:${color}">${KIND_LABEL[d.kind] || d.kind}</div>
+    <h3>${d.label}</h3>
+    <table>
+      <tr><td class="k">id</td><td class="v">${d.id}</td></tr>
+      <tr><td class="k">status</td><td class="v">${d.status ?? '—'}</td></tr>
+      <tr><td class="k">meta</td><td class="v">${d.meta ? JSON.stringify(d.meta) : '—'}</td></tr>
+    </table>
+    <div class="related">
+      <h4>Aristas (${related.length})</h4>
+      ${related.map(e => {
+        const otherId = e.from === d.id ? e.to : e.from;
+        const other = nodeById(otherId);
+        const dir = e.from === d.id ? '→' : '←';
+        return `<div class="related-item" onclick='window.__focusNode(${JSON.stringify(otherId)})'>
+          <span class="dot" style="background:${KIND_RESOLVED[other?.kind] || '#999'}"></span>
+          <span>${dir} <b>${e.kind}</b> ${other ? other.label : otherId}</span>
+        </div>`;
+      }).join('') || '<div style="color:var(--text-dim)">sin aristas</div>'}
+    </div>
+  `;
+}
+
+function showEdgeInspector(d) {
+  const el = document.getElementById('inspector');
+  el.classList.add('open');
+  const from = nodeById(d.from), to = nodeById(d.to);
+  const isSuggestion = d.kind === 'suggested';
+  el.innerHTML = `
+    <button class="close" onclick="closeInspector()">✕</button>
+    <div class="kind-badge" style="background:#ff922b22; color:#ff922b">Arista · ${d.kind}</div>
+    <h3>${from ? from.label : d.from} → ${to ? to.label : d.to}</h3>
+    <table>
+      <tr><td class="k">id</td><td class="v">${d.id}</td></tr>
+      <tr><td class="k">weight</td><td class="v">${d.weight ?? '—'}</td></tr>
+      <tr><td class="k">transient</td><td class="v">${d.transient ?? false}</td></tr>
+      <tr><td class="k">expiresAt</td><td class="v">${d.expiresAt ? new Date(d.expiresAt).toLocaleTimeString() : '—'}</td></tr>
+      <tr><td class="k">meta</td><td class="v">${d.meta ? JSON.stringify(d.meta) : '—'}</td></tr>
+    </table>
+    ${isSuggestion ? chatPanelHtml(d.id) : ''}
+  `;
+  if (isSuggestion) wireChatPanel(d.id);
+}
+
+window.closeInspector = () => { document.getElementById('inspector').classList.remove('open'); selected = null; };
+window.__focusNode = (id) => { const n = nodeById(id); if (n) showNodeInspector(n); };
+
+// ─── Chat de demo sobre una sugerencia ─────────────────────────────────────
+// Habla con POST /v1/_debug/chat — fuera del contrato documentado a
+// propósito (ver el comentario en apps/api/src/agent/debug-chat.ts). El LLM
+// real solo tiene dos usos definidos por ADR-007; esto es un tercero, de
+// demostración, no del producto.
+
+const chatHistories = {};
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function chatPanelHtml(suggestionId) {
+  return `
+    <div class="chat-panel">
+      <h4>Conversar sobre esta sugerencia</h4>
+      <div class="hint">Chat de demo — no es parte del agente real, es una capa aparte sobre el mismo LLM.</div>
+      <div class="chat-messages" id="chat-messages"></div>
+      <div class="chat-input-row">
+        <input type="text" id="chat-input" placeholder="Pregúntale algo…" />
+        <button id="chat-send">➤</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderChatMessages(suggestionId) {
+  const el = document.getElementById('chat-messages');
+  if (!el) return;
+  const history = chatHistories[suggestionId] || [];
+  el.innerHTML = history
+    .map((m) => `<div class="chat-msg ${m.role}">${escapeHtml(m.content)}</div>`)
+    .join('');
+  el.scrollTop = el.scrollHeight;
+}
+
+function wireChatPanel(suggestionId) {
+  renderChatMessages(suggestionId);
+  const input = document.getElementById('chat-input');
+  const send = document.getElementById('chat-send');
+
+  async function sendMessage() {
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    send.disabled = true;
+
+    const history = chatHistories[suggestionId] || (chatHistories[suggestionId] = []);
+    const historyBefore = history.slice();
+    history.push({ role: 'user', content: text });
+    renderChatMessages(suggestionId);
+
+    const base = document.getElementById('base-url').value.replace(/\/$/, '');
+    try {
+      const res = await fetch(base + '/v1/_debug/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ suggestionId, message: text, history: historyBefore }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || ('HTTP ' + res.status));
+      history.push({ role: 'assistant', content: data.reply });
+    } catch (e) {
+      history.push({ role: 'assistant', content: '⚠ ' + e.message });
+    }
+    send.disabled = false;
+    renderChatMessages(suggestionId);
+  }
+
+  send.onclick = sendMessage;
+  input.onkeydown = (e) => { if (e.key === 'Enter') sendMessage(); };
+}
+
+function applySearchHighlight() {
+  const q = document.getElementById('search').value.trim().toLowerCase();
+  nodeLayer.selectAll('g.node')
+    .classed('dimmed', d => q && !d.label.toLowerCase().includes(q))
+    .classed('hit', d => q && d.label.toLowerCase().includes(q));
+  edgeLayer.selectAll('line.edge').classed('dimmed', () => false);
+}
+
+document.getElementById('refresh').onclick = fetchGraph;
+document.getElementById('search').oninput = applySearchHighlight;
+document.getElementById('toggle-suggested').onchange = (e) => { showSuggested = e.target.checked; render(); };
+document.getElementById('toggle-others').onchange = (e) => { showOthers = e.target.checked; render(); };
+document.getElementById('toggle-isolated').onchange = (e) => { hideIsolated = e.target.checked; render(); };
+document.getElementById('reset-view').onclick = () => fitView(simulation.nodes());
+svg.on('click', () => closeInspector());
+
+window.addEventListener('resize', () => { simulation.alpha(0.3).restart(); });
+
+// ─── Tiempo real (Portal) ───────────────────────────────────────────────────
+// El resto de este archivo solo lee /v1/graph, que es nuestro propio backend
+// leyendo Postgres — no prueba el tramo Portal → cliente. Esto sí: se
+// suscribe de verdad al canal y aplica cada GraphPatch según llega.
+//
+// Usa un token anónimo (`POST /v1/tokens/anonymous` de la propia Portal, solo
+// con la clave pública — no toca nuestro backend en absoluto), no el JWT
+// propio de docs/03. Ese JWT requiere que Portal verifique la firma contra
+// nuestro JWKS, lo que exige tener `portal.config.ts` desplegado (`portal
+// deploy`) y el backend alcanzable por internet — ninguna de las dos cosas
+// vale para un backend en `localhost`. El anónimo funciona porque `GET
+// /v1/graph` ya es público sin auth (docs/05): ver el grafo en vivo no
+// debería exigir más identidad que ver su foto.
+async function mintAnonymousToken(pk) {
+  const res = await fetch('https://api.useportal.co/v1/tokens/anonymous', {
+    method: 'POST',
+    headers: { 'x-portal-key': pk, 'content-type': 'application/json' },
+    body: '{}',
+  });
+  if (!res.ok) throw new Error('no se pudo obtener un token anónimo de Portal (HTTP ' + res.status + ')');
+  const data = await res.json();
+  return data.token;
+}
+
+let ws = null;
+let reconnectTimer = null;
+let tokenRefreshTimer = null;
+
+function setRealtimeStatus(mode, text) {
+  document.getElementById('realtime-dot').className = 'dot' + (mode ? ' ' + mode : '');
+  document.getElementById('realtime-text').textContent = text;
+}
+
+async function connectRealtime() {
+  const pk = document.getElementById('portal-pk').value.trim();
+  if (!pk) { setRealtimeStatus('err', 'falta la clave pública (pk_...)'); return; }
+  localStorage.setItem('nodo_explorer_pk', pk);
+
+  clearTimeout(reconnectTimer);
+  clearTimeout(tokenRefreshTimer);
+  if (ws) { ws.onclose = null; ws.close(); }
+
+  try {
+    setRealtimeStatus(null, 'conectando…');
+    const token = await mintAnonymousToken(pk);
+
+    // El path real es /v1/channels/{id} — @portalsdk/wire-protocol lo
+    // documenta sin el /v1 en su ejemplo, y esa versión simplificada devuelve
+    // 404 contra el host real (@portalsdk/core, la fuente de verdad, sí lo
+    // lleva).
+    const url = new URL('wss://realtime.useportal.co/v1/channels/network-main');
+    url.searchParams.set('v', '1');
+    url.searchParams.set('token', token);
+    url.searchParams.set('key', pk);
+    url.searchParams.set('last', String(state.seq || 0));
+
+    ws = new WebSocket(url);
+
+    ws.onmessage = (event) => {
+      let frame;
+      try { frame = JSON.parse(event.data); } catch { return; }
+
+      if (frame.t === 'ready') {
+        setRealtimeStatus('ok', `tiempo real · seq ${frame.seq}`);
+        // Hueco entre el snapshot REST y la cabeza del canal al conectar: se
+        // re-pide el snapshot en vez de reconstruir desde el historial — el
+        // backfill de Portal es de 50 mensajes y no alcanza (docs/03).
+        if (frame.seq > (state.seq || 0) + 1) fetchGraph();
+        return;
+      }
+
+      if (frame.t === 'batch') {
+        for (const msg of frame.msgs) {
+          const envelope = msg.content;
+          if (typeof msg.seq === 'number') state.seq = Math.max(state.seq || 0, msg.seq);
+          if (envelope && envelope.graph) applyGraphPatch(envelope.graph);
+        }
+        setRealtimeStatus('ok', `tiempo real · seq ${state.seq}`);
+        renderMeta();
+      }
+    };
+
+    ws.onerror = () => setRealtimeStatus('err', 'error de conexión');
+
+    ws.onclose = (event) => {
+      setRealtimeStatus('err', `desconectado (${event.code}) — reintentando…`);
+      reconnectTimer = setTimeout(connectRealtime, 3000);
+    };
+
+    // El token anónimo dura 1 h; se refresca antes de que expire, no al
+    // fallar — reconectar con uno vencido sería un ciclo de reintentos.
+    tokenRefreshTimer = setTimeout(connectRealtime, 50 * 60 * 1000);
+  } catch (e) {
+    setRealtimeStatus('err', e.message);
+    reconnectTimer = setTimeout(connectRealtime, 5000);
+  }
+}
+
+/**
+ * Aplica un GraphPatch incremental sobre `state`, igual que un cliente real
+ * (docs/03). Upsert por id; reaplicar el mismo parche es idempotente, que es
+ * lo que hace segura la entrega *at-least-once* de Portal.
+ */
+function applyGraphPatch(patch) {
+  if (patch.nodes) {
+    for (const n of patch.nodes) {
+      const i = state.nodes.findIndex((x) => x.id === n.id);
+      if (i >= 0) state.nodes[i] = n; else state.nodes.push(n);
+    }
+  }
+  if (patch.edges) {
+    for (const e of patch.edges) {
+      const i = state.edges.findIndex((x) => x.id === e.id);
+      if (i >= 0) state.edges[i] = e; else state.edges.push(e);
+    }
+  }
+  if (patch.removeNodes) state.nodes = state.nodes.filter((n) => !patch.removeNodes.includes(n.id));
+  if (patch.removeEdges) state.edges = state.edges.filter((e) => !patch.removeEdges.includes(e.id));
+  render();
+}
+
+document.getElementById('connect-realtime').onclick = connectRealtime;
+
+const savedPk = localStorage.getItem('nodo_explorer_pk');
+if (savedPk) document.getElementById('portal-pk').value = savedPk;
+
+// ─── Panel de demo: crear perfil ────────────────────────────────────────────
+// POST /v1/people tal cual (docs/05) — sin login porque no hay login
+// (ADR-006). Si el canal en vivo está conectado, la persona nueva aparece
+// sola en el grafo, sin recargar nada: es la prueba visual de las dos mitades
+// de la pantalla trabajando juntas.
+
+document.getElementById('demo-submit').onclick = async () => {
+  const btn = document.getElementById('demo-submit');
+  const resultEl = document.getElementById('demo-result');
+  const name = document.getElementById('demo-name').value.trim();
+  const handle = document.getElementById('demo-handle').value.trim();
+  const skills = document.getElementById('demo-skills').value.split(',').map((s) => s.trim()).filter(Boolean);
+  const availability = document.getElementById('demo-availability').value;
+  const language = document.getElementById('demo-language').value;
+
+  if (!name || !handle) {
+    resultEl.className = 'err';
+    resultEl.textContent = 'Nombre y handle son obligatorios.';
+    return;
+  }
+
+  btn.disabled = true;
+  resultEl.className = '';
+  resultEl.textContent = 'Creando…';
+
+  const base = document.getElementById('base-url').value.replace(/\/$/, '');
+  try {
+    const res = await fetch(base + '/v1/people', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: name, handle, skills, availability, language }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || ('HTTP ' + res.status));
+
+    resultEl.className = 'ok';
+    resultEl.textContent = `✓ ${name} creado (${data.person.id}). ${document.getElementById('realtime-dot').classList.contains('ok') ? 'Debería aparecer solo en el grafo.' : 'Conecta el tiempo real para verlo aparecer sin refrescar.'}`;
+    document.getElementById('demo-handle').value = '';
+    document.getElementById('demo-name').value = '';
+    document.getElementById('demo-skills').value = '';
+  } catch (e) {
+    resultEl.className = 'err';
+    resultEl.textContent = '✗ ' + e.message;
+  }
+  btn.disabled = false;
+};
+
+// ─── Chat flotante: preguntas generales sobre el grafo ─────────────────────
+// POST /v1/_debug/chat sin suggestionId → agent/debug-chat.ts responde con un
+// resumen del estado actual (equipos reclutando, personas buscando).
+
+const floatingChatHistory = [];
+
+function renderFloatingChat() {
+  const el = document.getElementById('floating-chat-messages');
+  el.innerHTML = floatingChatHistory
+    .map((m) => `<div class="chat-msg ${m.role}">${escapeHtml(m.content)}</div>`)
+    .join('');
+  el.scrollTop = el.scrollHeight;
+}
+
+document.getElementById('floating-chat-toggle').onclick = () => {
+  document.getElementById('floating-chat-panel').classList.toggle('open');
+};
+document.getElementById('floating-chat-close').onclick = () => {
+  document.getElementById('floating-chat-panel').classList.remove('open');
+};
+
+document.getElementById('floating-chat-send').onclick = sendFloatingChatMessage;
+document.getElementById('floating-chat-input').onkeydown = (e) => {
+  if (e.key === 'Enter') sendFloatingChatMessage();
+};
+
+async function sendFloatingChatMessage() {
+  const input = document.getElementById('floating-chat-input');
+  const send = document.getElementById('floating-chat-send');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  send.disabled = true;
+
+  const historyBefore = floatingChatHistory.slice();
+  floatingChatHistory.push({ role: 'user', content: text });
+  renderFloatingChat();
+
+  const base = document.getElementById('base-url').value.replace(/\/$/, '');
+  try {
+    const res = await fetch(base + '/v1/_debug/chat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: text, history: historyBefore }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || ('HTTP ' + res.status));
+    floatingChatHistory.push({ role: 'assistant', content: data.reply });
+  } catch (e) {
+    floatingChatHistory.push({ role: 'assistant', content: '⚠ ' + e.message });
+  }
+  send.disabled = false;
+  renderFloatingChat();
+}
+
+fetchGraph();
+setInterval(fetchGraph, 20000); // reconciliación pasiva; el tiempo real es la vía principal cuando está conectado
+if (savedPk) connectRealtime();
+</script>
+</body>
+</html>

@@ -58,6 +58,18 @@ Tres dobles, uno por escenario:
 
 Los dos últimos importan más que el primero: cubren las rutas que en producción aparecen bajo fallo y que nunca se ejercitan a mano.
 
+### La cola del agente
+
+Hay una tercera costura, más pequeña, que existe solo por las pruebas de AC-02 y AC-03: el planificador de la cola. El agente no llama a `p-queue` directamente sino a una interfaz de un método, y el doble de pruebas ejecuta la tarea en el acto.
+
+```ts
+export interface Scheduler {
+  schedule(key: string, task: () => Promise<void>): void;
+}
+```
+
+Sin ella, «ejecutar el matchmaker de forma síncrona» obligaría a esperar los 800 ms de debounce en cada prueba, o a exponer internos de la cola para vaciarla a mano.
+
 ## Mapa de criterios de aceptación
 
 | AC | Nivel | Cómo se verifica |

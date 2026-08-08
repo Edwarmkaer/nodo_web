@@ -4,7 +4,15 @@
 
 ## Estado
 
-Especificación de backend completa. Sin implementación todavía.
+Backend implementado: `packages/contracts` (el contrato compartido) y `apps/api` (Hono, dominio, agente MatchMaker, Portal, esquema y migraciones). 74 pruebas en verde. Ver el detalle en [docs/README.md](docs/README.md#estado-de-la-implementación).
+
+```bash
+pnpm install
+cp apps/api/.env.example apps/api/.env   # ver docs/08
+pnpm --filter @nodo/api db:migrate
+pnpm --filter @nodo/api db:seed
+pnpm --filter @nodo/api dev
+```
 
 ## Documentación
 

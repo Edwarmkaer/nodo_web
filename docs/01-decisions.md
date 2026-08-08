@@ -162,6 +162,38 @@ auth: {
 
 `claimMap` mapea **por ruta con puntos**, no con funciones. Lo que se declare aquí es exactamente lo que aparece en `room.me.claims` y en `ctx.claims` dentro de `authz`.
 
+￼
+
+￼
+Auto
+￼
+
+￼
+
+￼
+
+￼
+Opus 5
+￼Esfuerzo:
+Alto
+￼
+Modo rápido desactivado
+Las teclas de flecha mueven el mosaico. Las flechas perpendiculares muestran una vista previa de la división; presiona Enter para confirmar o Escape para cancelar.
+
+
+Uso
+￼
+Ventana de contexto
+109.7k / 1.0M (11%)
+
+Límites de uso del plan · Pro
+
+Límite de 5 horas
+Se restablece en 3 h 34 min
+32%
+Semanal · todos los modelos
+Se restablece dom, 2:59 a.m.
+39%
 Ambos lados los cubre el paquete npm **`jose`**: firma el token y deriva el JWKS de la misma clave, sin construir el JSON a mano.
 
 ```ts
@@ -264,3 +296,50 @@ LLM_MODEL=llama-3.3-70b-versatile
 - El ID del modelo vive en `LLM_MODEL`, nunca en código: Groq rota y deprecia modelos con frecuencia y hay que poder cambiarlo sin desplegar.
 - Un proveedor **no** compatible con OpenAI necesitaría su propio adaptador detrás de la misma interfaz. La interfaz ya está preparada; el adaptador no se escribe hasta que haga falta.
 - El fallback de plantilla del agente cubre el caso de que ningún proveedor responda.
+
+---
+
+## ADR-009 — La marca de agua `seq` es la de `network-main`
+
+**Estado:** cerrada
+
+**Decisión.** El `seq` que devuelve `GET /v1/graph` es el último `seq` que Portal asignó a una publicación en `network-main`. No agrega canales. Se persiste en una tabla propia, `channel_watermarks`, y `GET /v1/graph` lo lee **antes** de consultar el grafo.
+
+```sql
+create table channel_watermarks (
+  channel     text primary key,
+  seq         bigint not null,
+  updated_at  timestamptz not null default now()
+);
+```
+
+**Por qué.**
+- El snapshot describe el grafo público, y el grafo público solo lo mutan los sobres de `network-main`: los de `team-*` no llevan `GraphPatch` ([ADR-010](#adr-010--el-sobre-distingue-eventos-de-grafo-de-eventos-de-canal-privado)). Una sola marca cubre exactamente lo que el snapshot promete.
+- Leer el `seq` antes que el grafo acota el peor caso a reaplicar un parche que el snapshot ya incluía, y el upsert por `id` es idempotente ([ADR-005](#adr-005--postgres-es-la-fuente-de-verdad-portal-es-transporte)).
+- Una tabla dedicada se rellena en toda publicación, también en las que tienen éxito. `outbox` solo recibe filas cuando la publicación falla, así que no puede sostener la marca.
+
+**Consecuencias.**
+- Cada publicación exitosa hace `upsert` de una fila. Es una escritura más por evento, fuera de la transacción de dominio.
+- Tras un reinicio la marca sobrevive en la tabla. Si está vacía —entorno nuevo—, `seq` es `0` y el cliente acepta todos los sobres: correcto, porque el snapshot ya trae el estado completo.
+- Un cliente suscrito a `team-{id}` no detecta huecos en ese canal con esta marca, y no lo necesita: esos sobres no mutan el grafo y su pérdida no desincroniza nada.
+
+---
+
+## ADR-010 — El sobre distingue eventos de grafo de eventos de canal privado
+
+**Estado:** cerrada
+
+**Decisión.** `Envelope` declara `graph?: GraphPatch`. Dos alias lo estrechan y son los que se usan: `MainEnvelope` exige el parche, `TeamEnvelope` lo prohíbe con `graph?: never`. `MainEvent` se construye sobre el primero y `TeamEvent` sobre el segundo.
+
+```ts
+type MainEnvelope<T extends string, P> = Envelope<T, P> & { graph: GraphPatch };
+type TeamEnvelope<T extends string, P> = Envelope<T, P> & { graph?: never };
+```
+
+**Por qué.**
+- Los sobres de `team-*` no tocan el grafo público por diseño: quién solicita a qué equipo es información sensible y no aparece en el grafo abierto ([03](03-portal-contract.md)). El tipo lo declara en vez de dejarlo a la disciplina de quien publica.
+- Con `graph?: never`, adjuntar un parche a un evento de canal privado deja de compilar en backend y en frontend a la vez, que es la garantía que motivó [ADR-003](#adr-003--backend-en-typescript-con-hono).
+
+**Consecuencias.**
+- El cliente aplica `envelope.graph` sin ramificar por `type`: el tipo ya determina cuándo existe.
+- Un `type` nuevo elige explícitamente su base. No hay opción por defecto.

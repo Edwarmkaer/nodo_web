@@ -21,10 +21,20 @@ El `sessionToken` nunca sirve para hablar con Portal, y el JWT de Portal nunca s
 ### Sesión e identidad
 
 ```http
-POST /v1/session
+POST /v1/people
 ```
-Crea identidad. Sin body. Idempotente vía header `X-Recovery-Code` si se recupera una sesión perdida.
-→ `201 { personId, sessionToken, recoveryCode }`
+Acuña identidad y perfil **en el mismo acto** ([ADR-006](01-decisions.md#adr-006--identidad-sin-contraseñas)): es la única ruta de escritura sin autenticar, porque es la que emite la credencial. Su payload está en «Personas».
+→ `201 { person, skills, sessionToken, recoveryCode }`
+
+`sessionToken` y `recoveryCode` se devuelven aquí y **en ningún otro sitio**: no aparecen en ningún DTO ([09](09-contracts.md)). Un segundo envío con el mismo `handle` no duplica la identidad, la rechaza con `409 HANDLE_TAKEN`.
+
+```http
+POST /v1/session/recover
+```
+Devuelve la identidad a quien perdió el `localStorage`. Body `{ recoveryCode }`.
+→ `200 { personId, sessionToken }` · `404 NOT_FOUND` si el código no existe.
+
+Emite un `sessionToken` nuevo y anula el anterior. La ruta va sin autenticar y el código es de 6 caracteres, así que se limita por IP y no por sesión — el límite por sesión de la tabla de errores no aplica a una llamada que todavía no tiene una.
 
 ```http
 POST /v1/portal/token          [auth]
@@ -44,16 +54,20 @@ Snapshot completo. Público y sin autenticación: el grafo es información abier
 
 `seq` es la marca de agua de Portal en el momento del snapshot. El cliente descarta los sobres con `seq` menor o igual.
 
-**De dónde sale ese `seq`:** cada `POST /v1/channels/{id}/messages` a Portal responde `200 { id, seq, timestamp }`. El backend guarda el último `seq` recibido por canal (en memoria, más una columna en `outbox` para el reinicio) y lo devuelve aquí. No hay forma de "preguntarle" el `seq` actual a Portal: se conoce porque somos el único publicador ([ADR-005](01-decisions.md)). Si el backend acaba de reiniciar y aún no ha publicado nada, devuelve `seq: 0` y el cliente acepta todos los sobres — correcto, porque el snapshot ya trae el estado completo y los parches son idempotentes.
+**De dónde sale ese `seq`:** cada `POST /v1/channels/{id}/messages` a Portal responde `200 { id, seq, timestamp }`. Tras cada publicación con éxito el backend hace `upsert` de la marca en `channel_watermarks`, y aquí devuelve la de `network-main` ([ADR-009](01-decisions.md#adr-009--la-marca-de-agua-seq-es-la-de-network-main)). No hay forma de "preguntarle" el `seq` actual a Portal: se conoce porque somos el único publicador ([ADR-005](01-decisions.md)). En un entorno recién sembrado, sin publicaciones, devuelve `seq: 0` y el cliente acepta todos los sobres — correcto, porque el snapshot ya trae el estado completo y los parches son idempotentes.
+
+**El handler lee la marca antes que el grafo.** El orden inverso abre una ventana en la que un sobre publicado entre ambas lecturas queda fuera del snapshot y por debajo del `seq`, así que el cliente lo descarta y pierde ese cambio hasta la siguiente reconexión.
 
 ### Personas
 
 ```http
-POST   /v1/people              [auth]   crea/completa el perfil
+POST   /v1/people                       crea identidad y perfil · sin auth
 PATCH  /v1/people/:id          [auth]   solo el propio
 PUT    /v1/people/:id/status   [auth]   { status: 'looking'|'idle' }
 GET    /v1/people/:id                   detalle público
 ```
+
+`POST` es create-only: toda edición posterior pasa por `PATCH`.
 
 `POST /v1/people`:
 ```jsonc
@@ -67,7 +81,7 @@ GET    /v1/people/:id                   detalle público
   "language": "es"
 }
 ```
-→ `201 { person, skills }` · publica `person.upserted` en `network-main`.
+→ `201 { person, skills, sessionToken, recoveryCode }` · publica `person.upserted` en `network-main`.
 
 Si viene `bioRaw` y `skills` está vacío, el backend llama al extractor (ver [06](06-matchmaker-agent.md)) **de forma síncrona** antes de responder. Tarda ~1,5 s y evita que el usuario vea un perfil sin skills.
 
@@ -75,7 +89,7 @@ Si viene `bioRaw` y `skills` está vacío, el backend llama al extractor (ver [0
 POST /v1/skills/extract        [auth]
 ```
 Extracción aislada, para el "previsualizar antes de guardar".
-Body `{ text }` → `200 { skills: [{ slug, label, confidence }] }`
+Body `{ text }` → `200 { skills: [{ slug, label, category, confidence }] }`
 
 ```http
 GET /v1/skills
@@ -113,7 +127,7 @@ GET   /v1/teams                          ?status=recruiting
   ]
 }
 ```
-→ `201 { team, needs }` · en una transacción crea el nodo, `LEADS`, `MEMBER_OF` y las aristas `NEEDS`; luego publica `team.created` y **encola el matchmaker**.
+→ `201 { team }` · en una transacción crea el nodo, `LEADS`, `MEMBER_OF` y las aristas `NEEDS`; luego publica `team.created` y **encola el matchmaker**. `TeamDTO` ya incluye `needs` y `members`, así que no viajan como campos aparte ([09](09-contracts.md)).
 
 `PUT /v1/teams/:id/needs` reemplaza el conjunto completo de needs (no es un parche). Publica `team.updated` y vuelve a encolar el matchmaker — es el disparador del caso de uso principal.
 
@@ -125,6 +139,8 @@ POST /v1/applications/:id/resolve      [auth: líder]   { action: 'accept'|'reje
 POST /v1/applications/:id/withdraw     [auth: solicitante]
 GET  /v1/teams/:id/applications        [auth: líder]
 ```
+
+Crear una solicitud cambia el claim `teams` del solicitante, que pasa a `applicant` en ese equipo. El token que tiene en memoria no lo refleja, así que el cliente reinvoca su callback tras el `201` si quiere leer `team-{id}` sin esperar al refresco ([03](03-portal-contract.md)).
 
 `resolve` con `accept` ejecuta el invariante 5 completo en una transacción:
 crea `MEMBER_OF` → `person.status = 'teamed'` → recalcula `team.status` → `auto_reject` de las demás `pending` de esa persona → invalida sugerencias vivas de esa persona.
